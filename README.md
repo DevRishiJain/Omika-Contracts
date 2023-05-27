@@ -1,7 +1,7 @@
 # GMX Contracts
-Contracts for GMX.
+Contracts for Omika Finance.
 
-Docs at https://gmxio.gitbook.io/gmx/contracts.
+Docs at https://docs.gnosischain.com/
 
 ## Install Dependencies
 If npx is not installed yet:
