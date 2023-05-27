@@ -1,4 +1,4 @@
-# GMX Contracts
+# Omika Contracts
 Contracts for Omika Finance.
 
 Docs at https://docs.gnosischain.com/
