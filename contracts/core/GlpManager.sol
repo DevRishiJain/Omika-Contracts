@@ -208,3 +208,4 @@ contract GlpManager {
         require(isHandler[msg.sender], "GlpManager: unauthorized handler");
     }
 }
+ 
