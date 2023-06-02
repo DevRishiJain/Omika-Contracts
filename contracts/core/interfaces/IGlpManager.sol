@@ -18,3 +18,4 @@ interface IGlpManager {
     function setShortsTrackerAveragePriceWeight(uint256 _shortsTrackerAveragePriceWeight) external;
     function setCooldownDuration(uint256 _cooldownDuration) external;
 }
+ 
