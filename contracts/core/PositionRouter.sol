@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+ // SPDX-License-Identifier: MIT
 
 pragma solidity ^0.6.0;
 
@@ -131,7 +131,8 @@ contract PositionRouter is BasePositionManager, IPositionRouter {
         uint256 index,
         uint256 queueIndex,
         uint256 blockNumber,
-        uint256 blockTime
+        uint256 blockTime,
+        uint256 gasPrice
     );
 
     event ExecuteDecreasePosition(
@@ -164,323 +165,215 @@ contract PositionRouter is BasePositionManager, IPositionRouter {
         uint256 timeGap
     );
 
-    event SetPositionKeeper(address indexed account, bool isActive);
-    event SetMinExecutionFee(uint256 minExecutionFee);
-    event SetIsLeverageEnabled(bool isLeverageEnabled);
-    event SetDelayValues(uint256 minBlockDelayKeeper, uint256 minTimeDelayPublic, uint256 maxTimeDelay);
-    event SetRequestKeysStartValues(uint256 increasePositionRequestKeysStart, uint256 decreasePositionRequestKeysStart);
-    event SetCallbackGasLimit(uint256 callbackGasLimit);
-    event SetCustomCallbackGasLimit(address callbackTarget, uint256 callbackGasLimit);
-    event Callback(address callbackTarget, bool success, uint256 callbackGasLimit);
+    event SetMinExecutionFee(
+        uint256 oldMinExecutionFee,
+        uint256 newMinExecutionFee
+    );
 
-    modifier onlyPositionKeeper() {
-        require(isPositionKeeper[msg.sender], "403");
-        _;
-    }
+    event SetDelayValues(
+        uint256 oldMinBlockDelayKeeper,
+        uint256 oldMinTimeDelayPublic,
+        uint256 oldMaxTimeDelay,
+        uint256 newMinBlockDelayKeeper,
+        uint256 newMinTimeDelayPublic,
+        uint256 newMaxTimeDelay
+    );
+
+    event SetRequestKeysStartValues(
+        uint256 oldIncreasePositionRequestKeysStart,
+        uint256 oldDecreasePositionRequestKeysStart,
+        uint256 newIncreasePositionRequestKeysStart,
+        uint256 newDecreasePositionRequestKeysStart
+    );
+
+    event SetIsLeverageEnabled(
+        bool oldIsLeverageEnabled,
+        bool newIsLeverageEnabled
+    );
+
+    event SetCallbackGasLimit(
+        uint256 oldCallbackGasLimit,
+        uint256 newCallbackGasLimit
+    );
+
+    event SetCustomCallbackGasLimit(
+        address indexed callbackTarget,
+        uint256 oldCallbackGasLimit,
+        uint256 newCallbackGasLimit
+    );
+
+    event SetPositionKeeper(
+        address indexed positionKeeper,
+        bool isActive
+    );
 
     constructor(
-        address _vault,
         address _router,
-        address _weth,
-        address _shortsTracker,
-        uint256 _depositFee,
-        uint256 _minExecutionFee
-    ) public BasePositionManager(_vault, _router, _shortsTracker, _weth, _depositFee) {
+        address _vault,
+        address _indexToken,
+        uint256 _leverageAmount,
+        uint256 _minExecutionFee,
+        uint256 _minBlockDelayKeeper,
+        uint256 _minTimeDelayPublic,
+        uint256 _maxTimeDelay,
+        uint256 _increasePositionRequestKeysStart,
+        uint256 _decreasePositionRequestKeysStart,
+        uint256 _callbackGasLimit
+    )
+        public
+        BasePositionManager(
+            _router,
+            _vault,
+            _indexToken,
+            _leverageAmount
+        )
+    {
         minExecutionFee = _minExecutionFee;
-    }
-
-    function setPositionKeeper(address _account, bool _isActive) external onlyAdmin {
-        isPositionKeeper[_account] = _isActive;
-        emit SetPositionKeeper(_account, _isActive);
-    }
-
-    function setCallbackGasLimit(uint256 _callbackGasLimit) external onlyAdmin {
-        callbackGasLimit = _callbackGasLimit;
-        emit SetCallbackGasLimit(_callbackGasLimit);
-    }
-
-    function setCustomCallbackGasLimit(address _callbackTarget, uint256 _callbackGasLimit) external onlyAdmin {
-        customCallbackGasLimits[_callbackTarget] = _callbackGasLimit;
-        emit SetCustomCallbackGasLimit(_callbackTarget, _callbackGasLimit);
-    }
-
-    function setMinExecutionFee(uint256 _minExecutionFee) external onlyAdmin {
-        minExecutionFee = _minExecutionFee;
-        emit SetMinExecutionFee(_minExecutionFee);
-    }
-
-    function setIsLeverageEnabled(bool _isLeverageEnabled) external onlyAdmin {
-        isLeverageEnabled = _isLeverageEnabled;
-        emit SetIsLeverageEnabled(_isLeverageEnabled);
-    }
-
-    function setDelayValues(uint256 _minBlockDelayKeeper, uint256 _minTimeDelayPublic, uint256 _maxTimeDelay) external onlyAdmin {
         minBlockDelayKeeper = _minBlockDelayKeeper;
         minTimeDelayPublic = _minTimeDelayPublic;
         maxTimeDelay = _maxTimeDelay;
-        emit SetDelayValues(_minBlockDelayKeeper, _minTimeDelayPublic, _maxTimeDelay);
-    }
-
-    function setRequestKeysStartValues(uint256 _increasePositionRequestKeysStart, uint256 _decreasePositionRequestKeysStart) external onlyAdmin {
         increasePositionRequestKeysStart = _increasePositionRequestKeysStart;
         decreasePositionRequestKeysStart = _decreasePositionRequestKeysStart;
-
-        emit SetRequestKeysStartValues(_increasePositionRequestKeysStart, _decreasePositionRequestKeysStart);
+        callbackGasLimit = _callbackGasLimit;
     }
 
-    function executeIncreasePositions(uint256 _endIndex, address payable _executionFeeReceiver) external override onlyPositionKeeper {
-        uint256 index = increasePositionRequestKeysStart;
-        uint256 length = increasePositionRequestKeys.length;
-
-        if (index >= length) { return; }
-
-        if (_endIndex > length) {
-            _endIndex = length;
-        }
-
-        while (index < _endIndex) {
-            bytes32 key = increasePositionRequestKeys[index];
-
-            // if the request was executed then delete the key from the array
-            // if the request was not executed then break from the loop, this can happen if the
-            // minimum number of blocks has not yet passed
-            // an error could be thrown if the request is too old or if the slippage is
-            // higher than what the user specified, or if there is insufficient liquidity for the position
-            // in case an error was thrown, cancel the request
-            try this.executeIncreasePosition(key, _executionFeeReceiver) returns (bool _wasExecuted) {
-                if (!_wasExecuted) { break; }
-            } catch {
-                // wrap this call in a try catch to prevent invalid cancels from blocking the loop
-                try this.cancelIncreasePosition(key, _executionFeeReceiver) returns (bool _wasCancelled) {
-                    if (!_wasCancelled) { break; }
-                } catch {}
-            }
-
-            delete increasePositionRequestKeys[index];
-            index++;
-        }
-
-        increasePositionRequestKeysStart = index;
+    function setPositionKeeper(address positionKeeper, bool isActive)
+        external
+        onlyRouter
+    {
+        isPositionKeeper[positionKeeper] = isActive;
+        emit SetPositionKeeper(positionKeeper, isActive);
     }
 
-    function executeDecreasePositions(uint256 _endIndex, address payable _executionFeeReceiver) external override onlyPositionKeeper {
-        uint256 index = decreasePositionRequestKeysStart;
-        uint256 length = decreasePositionRequestKeys.length;
+    function setCallbackGasLimit(uint256 newCallbackGasLimit)
+        external
+        onlyRouter
+    {
+        emit SetCallbackGasLimit(callbackGasLimit, newCallbackGasLimit);
+        callbackGasLimit = newCallbackGasLimit;
+    }
 
-        if (index >= length) { return; }
+    function setCustomCallbackGasLimit(address callbackTarget, uint256 newCallbackGasLimit)
+        external
+        onlyRouter
+    {
+        uint256 oldCallbackGasLimit = customCallbackGasLimits[callbackTarget];
+        emit SetCustomCallbackGasLimit(callbackTarget, oldCallbackGasLimit, newCallbackGasLimit);
+        customCallbackGasLimits[callbackTarget] = newCallbackGasLimit;
+    }
 
-        if (_endIndex > length) {
-            _endIndex = length;
-        }
+    function setMinExecutionFee(uint256 newMinExecutionFee) external onlyRouter {
+        emit SetMinExecutionFee(minExecutionFee, newMinExecutionFee);
+        minExecutionFee = newMinExecutionFee;
+    }
 
-        while (index < _endIndex) {
-            bytes32 key = decreasePositionRequestKeys[index];
+    function setDelayValues(
+        uint256 newMinBlockDelayKeeper,
+        uint256 newMinTimeDelayPublic,
+        uint256 newMaxTimeDelay
+    )
+        external
+        onlyRouter
+    {
+        emit SetDelayValues(
+            minBlockDelayKeeper,
+            minTimeDelayPublic,
+            maxTimeDelay,
+            newMinBlockDelayKeeper,
+            newMinTimeDelayPublic,
+            newMaxTimeDelay
+        );
+        minBlockDelayKeeper = newMinBlockDelayKeeper;
+        minTimeDelayPublic = newMinTimeDelayPublic;
+        maxTimeDelay = newMaxTimeDelay;
+    }
 
-            // if the request was executed then delete the key from the array
-            // if the request was not executed then break from the loop, this can happen if the
-            // minimum number of blocks has not yet passed
-            // an error could be thrown if the request is too old
-            // in case an error was thrown, cancel the request
-            try this.executeDecreasePosition(key, _executionFeeReceiver) returns (bool _wasExecuted) {
-                if (!_wasExecuted) { break; }
-            } catch {
-                // wrap this call in a try catch to prevent invalid cancels from blocking the loop
-                try this.cancelDecreasePosition(key, _executionFeeReceiver) returns (bool _wasCancelled) {
-                    if (!_wasCancelled) { break; }
-                } catch {}
-            }
+    function setRequestKeysStartValues(
+        uint256 newIncreasePositionRequestKeysStart,
+        uint256 newDecreasePositionRequestKeysStart
+    )
+        external
+        onlyRouter
+    {
+        emit SetRequestKeysStartValues(
+            increasePositionRequestKeysStart,
+            decreasePositionRequestKeysStart,
+            newIncreasePositionRequestKeysStart,
+            newDecreasePositionRequestKeysStart
+        );
+        increasePositionRequestKeysStart = newIncreasePositionRequestKeysStart;
+        decreasePositionRequestKeysStart = newDecreasePositionRequestKeysStart;
+    }
 
-            delete decreasePositionRequestKeys[index];
-            index++;
-        }
-
-        decreasePositionRequestKeysStart = index;
+    function setIsLeverageEnabled(bool newIsLeverageEnabled) external onlyRouter {
+        emit SetIsLeverageEnabled(isLeverageEnabled, newIsLeverageEnabled);
+        isLeverageEnabled = newIsLeverageEnabled;
     }
 
     function createIncreasePosition(
-        address[] memory _path,
-        address _indexToken,
-        uint256 _amountIn,
-        uint256 _minOut,
-        uint256 _sizeDelta,
-        bool _isLong,
-        uint256 _acceptablePrice,
-        uint256 _executionFee,
-        bytes32 _referralCode,
-        address _callbackTarget
-    ) external payable nonReentrant returns (bytes32) {
-        require(_executionFee >= minExecutionFee, "fee");
-        require(msg.value == _executionFee, "val");
-        require(_path.length == 1 || _path.length == 2, "len");
+        address[] memory path,
+        uint256 amountIn,
+        uint256 minOut,
+        uint256 sizeDelta,
+        bool isLong,
+        uint256 acceptablePrice,
+        address callbackTarget
+    ) external override returns (bytes32) {
+        require(isLeverageEnabled, "Leverage is disabled");
+        require(path.length > 0, "Path not specified");
+        require(sizeDelta > 0, "Invalid size delta");
+        require(amountIn > 0, "Invalid amount in");
+        require(minOut > 0, "Invalid min out");
+        require(acceptablePrice > 0, "Invalid acceptable price");
 
-        _transferInETH();
-        _setTraderReferralCode(_referralCode);
+        address account = msg.sender;
+        bytes32 requestId = generateIncreasePositionRequestId();
+        IncreasePositionRequest storage request = increasePositionRequests[requestId];
 
-        if (_amountIn > 0) {
-            IRouter(router).pluginTransfer(_path[0], msg.sender, address(this), _amountIn);
-        }
+        request.account = account;
+        request.path = path;
+        request.indexToken = path[path.length - 1];
+        request.amountIn = amountIn;
+        request.minOut = minOut;
+        request.sizeDelta = sizeDelta;
+        request.isLong = isLong;
+        request.acceptablePrice = acceptablePrice;
+        request.executionFee = calculateExecutionFee(amountIn);
+        request.blockNumber = block.number;
+        request.blockTime = block.timestamp;
+        request.hasCollateralInETH = hasCollateralInETH(path);
+        request.callbackTarget = callbackTarget;
 
-        return _createIncreasePosition(
-            msg.sender,
-            _path,
-            _indexToken,
-            _amountIn,
-            _minOut,
-            _sizeDelta,
-            _isLong,
-            _acceptablePrice,
-            _executionFee,
-            false,
-            _callbackTarget
-        );
-    }
+        increasePositionsIndex[account]++;
 
-    function createIncreasePositionETH(
-        address[] memory _path,
-        address _indexToken,
-        uint256 _minOut,
-        uint256 _sizeDelta,
-        bool _isLong,
-        uint256 _acceptablePrice,
-        uint256 _executionFee,
-        bytes32 _referralCode,
-        address _callbackTarget
-    ) external payable nonReentrant returns (bytes32) {
-        require(_executionFee >= minExecutionFee, "fee");
-        require(msg.value >= _executionFee, "val");
-        require(_path.length == 1 || _path.length == 2, "len");
-        require(_path[0] == weth, "path");
-        _transferInETH();
-        _setTraderReferralCode(_referralCode);
-
-        uint256 amountIn = msg.value.sub(_executionFee);
-
-        return _createIncreasePosition(
-            msg.sender,
-            _path,
-            _indexToken,
-            amountIn,
-            _minOut,
-            _sizeDelta,
-            _isLong,
-            _acceptablePrice,
-            _executionFee,
-            true,
-            _callbackTarget
-        );
-    }
-
-    function createDecreasePosition(
-        address[] memory _path,
-        address _indexToken,
-        uint256 _collateralDelta,
-        uint256 _sizeDelta,
-        bool _isLong,
-        address _receiver,
-        uint256 _acceptablePrice,
-        uint256 _minOut,
-        uint256 _executionFee,
-        bool _withdrawETH,
-        address _callbackTarget
-    ) external payable nonReentrant returns (bytes32) {
-        require(_executionFee >= minExecutionFee, "fee");
-        require(msg.value == _executionFee, "val");
-        require(_path.length == 1 || _path.length == 2, "len");
-
-        if (_withdrawETH) {
-            require(_path[_path.length - 1] == weth, "path");
-        }
-
-        _transferInETH();
-
-        return _createDecreasePosition(
-            msg.sender,
-            _path,
-            _indexToken,
-            _collateralDelta,
-            _sizeDelta,
-            _isLong,
-            _receiver,
-            _acceptablePrice,
-            _minOut,
-            _executionFee,
-            _withdrawETH,
-            _callbackTarget
-        );
-    }
-
-    function getRequestQueueLengths() external view override returns (uint256, uint256, uint256, uint256) {
-        return (
-            increasePositionRequestKeysStart,
-            increasePositionRequestKeys.length,
-            decreasePositionRequestKeysStart,
-            decreasePositionRequestKeys.length
-        );
-    }
-
-    function executeIncreasePosition(bytes32 _key, address payable _executionFeeReceiver) public nonReentrant returns (bool) {
-        IncreasePositionRequest memory request = increasePositionRequests[_key];
-        // if the request was already executed or cancelled, return true so that the executeIncreasePositions loop will continue executing the next request
-        if (request.account == address(0)) { return true; }
-
-        bool shouldExecute = _validateExecution(request.blockNumber, request.blockTime, request.account);
-        if (!shouldExecute) { return false; }
-
-        delete increasePositionRequests[_key];
-
-        if (request.amountIn > 0) {
-            uint256 amountIn = request.amountIn;
-
-            if (request.path.length > 1) {
-                IERC20(request.path[0]).safeTransfer(vault, request.amountIn);
-                amountIn = _swap(request.path, request.minOut, address(this));
-            }
-
-            uint256 afterFeeAmount = _collectFees(request.account, request.path, amountIn, request.indexToken, request.isLong, request.sizeDelta);
-            IERC20(request.path[request.path.length - 1]).safeTransfer(vault, afterFeeAmount);
-        }
-
-        _increasePosition(request.account, request.path[request.path.length - 1], request.indexToken, request.sizeDelta, request.isLong, request.acceptablePrice);
-
-        _transferOutETHWithGasLimitFallbackToWeth(request.executionFee, _executionFeeReceiver);
-
-        emit ExecuteIncreasePosition(
-            request.account,
-            request.path,
+        emit CreateIncreasePosition(
+            account,
+            path,
             request.indexToken,
-            request.amountIn,
-            request.minOut,
-            request.sizeDelta,
-            request.isLong,
-            request.acceptablePrice,
+            amountIn,
+            minOut,
+            sizeDelta,
+            isLong,
+            acceptablePrice,
             request.executionFee,
-            block.number.sub(request.blockNumber),
-            block.timestamp.sub(request.blockTime)
+            increasePositionsIndex[account],
+            increasePositionRequestKeys.length,
+            request.blockNumber,
+            request.blockTime,
+            tx.gasprice
         );
 
-        _callRequestCallback(request.callbackTarget, _key, true, true);
+        increasePositionRequestKeys.push(requestId);
 
-        return true;
+        return requestId;
     }
 
-    function cancelIncreasePosition(bytes32 _key, address payable _executionFeeReceiver) public nonReentrant returns (bool) {
-        IncreasePositionRequest memory request = increasePositionRequests[_key];
-        // if the request was already executed or cancelled, return true so that the executeIncreasePositions loop will continue executing the next request
-        if (request.account == address(0)) { return true; }
+    function cancelIncreasePosition(bytes32 requestId) external override {
+        IncreasePositionRequest storage request = increasePositionRequests[requestId];
+        require(request.account == msg.sender, "Not the owner");
+        require(requestId < increasePositionRequestKeys[increasePositionsIndex[request.account] - 1], "Invalid request ID");
 
-        bool shouldCancel = _validateCancellation(request.blockNumber, request.blockTime, request.account);
-        if (!shouldCancel) { return false; }
-
-        delete increasePositionRequests[_key];
-
-        if (request.hasCollateralInETH) {
-            _transferOutETHWithGasLimitFallbackToWeth(request.amountIn, payable(request.account));
-        } else {
-            IERC20(request.path[0]).safeTransfer(request.account, request.amountIn);
-        }
-
-       _transferOutETHWithGasLimitFallbackToWeth(request.executionFee, _executionFeeReceiver);
-
+        delete increasePositionRequests[requestId];
         emit CancelIncreasePosition(
             request.account,
             request.path,
@@ -494,71 +387,74 @@ contract PositionRouter is BasePositionManager, IPositionRouter {
             block.number.sub(request.blockNumber),
             block.timestamp.sub(request.blockTime)
         );
-
-        _callRequestCallback(request.callbackTarget, _key, false, true);
-
-        return true;
     }
 
-    function executeDecreasePosition(bytes32 _key, address payable _executionFeeReceiver) public nonReentrant returns (bool) {
-        DecreasePositionRequest memory request = decreasePositionRequests[_key];
-        // if the request was already executed or cancelled, return true so that the executeDecreasePositions loop will continue executing the next request
-        if (request.account == address(0)) { return true; }
+    function createDecreasePosition(
+        address[] memory path,
+        uint256 collateralDelta,
+        uint256 sizeDelta,
+        bool isLong,
+        address receiver,
+        uint256 acceptablePrice,
+        uint256 minOut,
+        address callbackTarget
+    ) external override returns (bytes32) {
+        require(path.length > 0, "Path not specified");
+        require(sizeDelta > 0, "Invalid size delta");
+        require(collateralDelta > 0, "Invalid collateral delta");
+        require(acceptablePrice > 0, "Invalid acceptable price");
+        require(receiver != address(0), "Invalid receiver");
 
-        bool shouldExecute = _validateExecution(request.blockNumber, request.blockTime, request.account);
-        if (!shouldExecute) { return false; }
+        address account = msg.sender;
+        bytes32 requestId = generateDecreasePositionRequestId();
+        DecreasePositionRequest storage request = decreasePositionRequests[requestId];
 
-        delete decreasePositionRequests[_key];
+        request.account = account;
+        request.path = path;
+        request.indexToken = path[path.length - 1];
+        request.collateralDelta = collateralDelta;
+        request.sizeDelta = sizeDelta;
+        request.isLong = isLong;
+        request.receiver = receiver;
+        request.acceptablePrice = acceptablePrice;
+        request.minOut = minOut;
+        request.executionFee = calculateExecutionFee(collateralDelta);
+        request.blockNumber = block.number;
+        request.blockTime = block.timestamp;
+        request.withdrawETH = hasCollateralInETH(path);
+        request.callbackTarget = callbackTarget;
 
-        uint256 amountOut = _decreasePosition(request.account, request.path[0], request.indexToken, request.collateralDelta, request.sizeDelta, request.isLong, address(this), request.acceptablePrice);
+        decreasePositionsIndex[account]++;
 
-        if (amountOut > 0) {
-            if (request.path.length > 1) {
-                IERC20(request.path[0]).safeTransfer(vault, amountOut);
-                amountOut = _swap(request.path, request.minOut, address(this));
-            }
-
-            if (request.withdrawETH) {
-               _transferOutETHWithGasLimitFallbackToWeth(amountOut, payable(request.receiver));
-            } else {
-               IERC20(request.path[request.path.length - 1]).safeTransfer(request.receiver, amountOut);
-            }
-        }
-
-       _transferOutETHWithGasLimitFallbackToWeth(request.executionFee, _executionFeeReceiver);
-
-        emit ExecuteDecreasePosition(
-            request.account,
-            request.path,
+        emit CreateDecreasePosition(
+            account,
+            path,
             request.indexToken,
-            request.collateralDelta,
-            request.sizeDelta,
-            request.isLong,
-            request.receiver,
-            request.acceptablePrice,
-            request.minOut,
+            collateralDelta,
+            sizeDelta,
+            isLong,
+            receiver,
+            acceptablePrice,
+            minOut,
             request.executionFee,
-            block.number.sub(request.blockNumber),
-            block.timestamp.sub(request.blockTime)
+            decreasePositionsIndex[account],
+            decreasePositionRequestKeys.length,
+            request.blockNumber,
+            request.blockTime,
+            tx.gasprice
         );
 
-        _callRequestCallback(request.callbackTarget, _key, true, false);
+        decreasePositionRequestKeys.push(requestId);
 
-        return true;
+        return requestId;
     }
 
-    function cancelDecreasePosition(bytes32 _key, address payable _executionFeeReceiver) public nonReentrant returns (bool) {
-        DecreasePositionRequest memory request = decreasePositionRequests[_key];
-        // if the request was already executed or cancelled, return true so that the executeDecreasePositions loop will continue executing the next request
-        if (request.account == address(0)) { return true; }
+    function cancelDecreasePosition(bytes32 requestId) external override {
+        DecreasePositionRequest storage request = decreasePositionRequests[requestId];
+        require(request.account == msg.sender, "Not the owner");
+        require(requestId < decreasePositionRequestKeys[decreasePositionsIndex[request.account] - 1], "Invalid request ID");
 
-        bool shouldCancel = _validateCancellation(request.blockNumber, request.blockTime, request.account);
-        if (!shouldCancel) { return false; }
-
-        delete decreasePositionRequests[_key];
-
-       _transferOutETHWithGasLimitFallbackToWeth(request.executionFee, _executionFeeReceiver);
-
+        delete decreasePositionRequests[requestId];
         emit CancelDecreasePosition(
             request.account,
             request.path,
@@ -573,218 +469,140 @@ contract PositionRouter is BasePositionManager, IPositionRouter {
             block.number.sub(request.blockNumber),
             block.timestamp.sub(request.blockTime)
         );
-
-        _callRequestCallback(request.callbackTarget, _key, false, false);
-
-        return true;
     }
 
-    function getRequestKey(address _account, uint256 _index) public pure returns (bytes32) {
-        return keccak256(abi.encodePacked(_account, _index));
-    }
+    function executeIncreasePosition(bytes32 requestId, uint256 deadline)
+        external
+        payable
+        override
+        returns (uint256 receivedAmount)
+    {
+        IncreasePositionRequest storage request = increasePositionRequests[requestId];
+        require(request.account != address(0), "Request does not exist");
+        require(request.amountIn > 0, "Amount in not specified");
+        require(request.minOut > 0, "Min out not specified");
+        require(request.sizeDelta > 0, "Size delta not specified");
+        require(request.acceptablePrice > 0, "Acceptable price not specified");
+        require(request.executionFee > 0, "Execution fee not specified");
+        require(request.blockNumber > 0, "Block number not specified");
+        require(request.blockTime > 0, "Block time not specified");
+        require(block.number >= request.blockNumber.add(minBlockDelayKeeper), "Block delay not met");
+        require(block.timestamp >= request.blockTime.add(minTimeDelayPublic), "Time delay not met");
+        require(block.timestamp <= request.blockTime.add(maxTimeDelay), "Request expired");
+        require(deadline >= block.timestamp, "Transaction deadline exceeded");
+        require(msg.value >= request.executionFee, "Insufficient ETH");
 
-    function getIncreasePositionRequestPath(bytes32 _key) public view override returns (address[] memory) {
-        IncreasePositionRequest memory request = increasePositionRequests[_key];
-        return request.path;
-    }
+        address account = request.account;
+        address[] memory path = request.path;
+        address indexToken = request.indexToken;
+        uint256 amountIn = request.amountIn;
+        uint256 minOut = request.minOut;
+        uint256 sizeDelta = request.sizeDelta;
+        bool isLong = request.isLong;
+        uint256 acceptablePrice = request.acceptablePrice;
+        uint256 executionFee = request.executionFee;
+        bool hasCollateralInETH = request.hasCollateralInETH;
+        address callbackTarget = request.callbackTarget;
 
-    function getDecreasePositionRequestPath(bytes32 _key) public view override returns (address[] memory) {
-        DecreasePositionRequest memory request = decreasePositionRequests[_key];
-        return request.path;
-    }
+        delete increasePositionRequests[requestId];
 
-    function _setTraderReferralCode(bytes32 _referralCode) internal {
-        if (_referralCode != bytes32(0) && referralStorage != address(0)) {
-            IReferralStorage(referralStorage).setTraderReferralCode(msg.sender, _referralCode);
-        }
-    }
-
-    function _validateExecution(uint256 _positionBlockNumber, uint256 _positionBlockTime, address _account) internal view returns (bool) {
-        if (_positionBlockTime.add(maxTimeDelay) <= block.timestamp) {
-            revert("expired");
-        }
-
-        return _validateExecutionOrCancellation(_positionBlockNumber, _positionBlockTime, _account);
-    }
-
-    function _validateCancellation(uint256 _positionBlockNumber, uint256 _positionBlockTime, address _account) internal view returns (bool) {
-        return _validateExecutionOrCancellation(_positionBlockNumber, _positionBlockTime, _account);
-    }
-
-    function _validateExecutionOrCancellation(uint256 _positionBlockNumber, uint256 _positionBlockTime, address _account) internal view returns (bool) {
-        bool isKeeperCall = msg.sender == address(this) || isPositionKeeper[msg.sender];
-
-        if (!isLeverageEnabled && !isKeeperCall) {
-            revert("403");
-        }
-
-        if (isKeeperCall) {
-            return _positionBlockNumber.add(minBlockDelayKeeper) <= block.number;
-        }
-
-        require(msg.sender == _account, "403");
-
-        require(_positionBlockTime.add(minTimeDelayPublic) <= block.timestamp, "delay");
-
-        return true;
-    }
-
-    function _createIncreasePosition(
-        address _account,
-        address[] memory _path,
-        address _indexToken,
-        uint256 _amountIn,
-        uint256 _minOut,
-        uint256 _sizeDelta,
-        bool _isLong,
-        uint256 _acceptablePrice,
-        uint256 _executionFee,
-        bool _hasCollateralInETH,
-        address _callbackTarget
-    ) internal returns (bytes32) {
-        IncreasePositionRequest memory request = IncreasePositionRequest(
-            _account,
-            _path,
-            _indexToken,
-            _amountIn,
-            _minOut,
-            _sizeDelta,
-            _isLong,
-            _acceptablePrice,
-            _executionFee,
-            block.number,
-            block.timestamp,
-            _hasCollateralInETH,
-            _callbackTarget
+        receivedAmount = executeIncreasePositionInternal(
+            account,
+            path,
+            indexToken,
+            amountIn,
+            minOut,
+            sizeDelta,
+            isLong,
+            acceptablePrice,
+            executionFee,
+            hasCollateralInETH,
+            callbackTarget
         );
 
-        (uint256 index, bytes32 requestKey) = _storeIncreasePositionRequest(request);
-        emit CreateIncreasePosition(
-            _account,
-            _path,
-            _indexToken,
-            _amountIn,
-            _minOut,
-            _sizeDelta,
-            _isLong,
-            _acceptablePrice,
-            _executionFee,
-            index,
-            increasePositionRequestKeys.length - 1,
-            block.number,
-            block.timestamp,
-            tx.gasprice
+        emit ExecuteIncreasePosition(
+            account,
+            path,
+            indexToken,
+            amountIn,
+            minOut,
+            sizeDelta,
+            isLong,
+            acceptablePrice,
+            executionFee,
+            block.number.sub(request.blockNumber),
+            block.timestamp.sub(request.blockTime)
         );
 
-        return requestKey;
+        return receivedAmount;
     }
 
-    function _storeIncreasePositionRequest(IncreasePositionRequest memory _request) internal returns (uint256, bytes32) {
-        address account = _request.account;
-        uint256 index = increasePositionsIndex[account].add(1);
-        increasePositionsIndex[account] = index;
-        bytes32 key = getRequestKey(account, index);
+    function executeDecreasePosition(bytes32 requestId, uint256 deadline)
+        external
+        payable
+        override
+        returns (uint256 receivedCollateral)
+    {
+        DecreasePositionRequest storage request = decreasePositionRequests[requestId];
+        require(request.account != address(0), "Request does not exist");
+        require(request.collateralDelta > 0, "Collateral delta not specified");
+        require(request.sizeDelta > 0, "Size delta not specified");
+        require(request.acceptablePrice > 0, "Acceptable price not specified");
+        require(request.minOut > 0, "Min out not specified");
+        require(request.executionFee > 0, "Execution fee not specified");
+        require(request.blockNumber > 0, "Block number not specified");
+        require(request.blockTime > 0, "Block time not specified");
+        require(block.number >= request.blockNumber.add(minBlockDelayKeeper), "Block delay not met");
+        require(block.timestamp >= request.blockTime.add(minTimeDelayPublic), "Time delay not met");
+        require(block.timestamp <= request.blockTime.add(maxTimeDelay), "Request expired");
+        require(deadline >= block.timestamp, "Transaction deadline exceeded");
+        require(msg.value >= request.executionFee, "Insufficient ETH");
 
-        increasePositionRequests[key] = _request;
-        increasePositionRequestKeys.push(key);
+        address account = request.account;
+        address[] memory path = request.path;
+        address indexToken = request.indexToken;
+        uint256 collateralDelta = request.collateralDelta;
+        uint256 sizeDelta = request.sizeDelta;
+        bool isLong = request.isLong;
+        address receiver = request.receiver;
+        uint256 acceptablePrice = request.acceptablePrice;
+        uint256 minOut = request.minOut;
+        uint256 executionFee = request.executionFee;
+        bool withdrawETH = request.withdrawETH;
+        address callbackTarget = request.callbackTarget;
 
-        return (index, key);
-    }
+        delete decreasePositionRequests[requestId];
 
-    function _storeDecreasePositionRequest(DecreasePositionRequest memory _request) internal returns (uint256, bytes32) {
-        address account = _request.account;
-        uint256 index = decreasePositionsIndex[account].add(1);
-        decreasePositionsIndex[account] = index;
-        bytes32 key = getRequestKey(account, index);
-
-        decreasePositionRequests[key] = _request;
-        decreasePositionRequestKeys.push(key);
-
-        return (index, key);
-    }
-
-    function _createDecreasePosition(
-        address _account,
-        address[] memory _path,
-        address _indexToken,
-        uint256 _collateralDelta,
-        uint256 _sizeDelta,
-        bool _isLong,
-        address _receiver,
-        uint256 _acceptablePrice,
-        uint256 _minOut,
-        uint256 _executionFee,
-        bool _withdrawETH,
-        address _callbackTarget
-    ) internal returns (bytes32) {
-        DecreasePositionRequest memory request = DecreasePositionRequest(
-            _account,
-            _path,
-            _indexToken,
-            _collateralDelta,
-            _sizeDelta,
-            _isLong,
-            _receiver,
-            _acceptablePrice,
-            _minOut,
-            _executionFee,
-            block.number,
-            block.timestamp,
-            _withdrawETH,
-            _callbackTarget
+        receivedCollateral = executeDecreasePositionInternal(
+            account,
+            path,
+            indexToken,
+            collateralDelta,
+            sizeDelta,
+            isLong,
+            receiver,
+            acceptablePrice,
+            minOut,
+            executionFee,
+            withdrawETH,
+            callbackTarget
         );
 
-        (uint256 index, bytes32 requestKey) = _storeDecreasePositionRequest(request);
-        emit CreateDecreasePosition(
-            request.account,
-            request.path,
-            request.indexToken,
-            request.collateralDelta,
-            request.sizeDelta,
-            request.isLong,
-            request.receiver,
-            request.acceptablePrice,
-            request.minOut,
-            request.executionFee,
-            index,
-            decreasePositionRequestKeys.length - 1,
-            block.number,
-            block.timestamp
+        emit ExecuteDecreasePosition(
+            account,
+            path,
+            indexToken,
+            collateralDelta,
+            sizeDelta,
+            isLong,
+            receiver,
+            acceptablePrice,
+            minOut,
+            executionFee,
+            block.number.sub(request.blockNumber),
+            block.timestamp.sub(request.blockTime)
         );
-        return requestKey;
-    }
 
-    function _callRequestCallback(
-        address _callbackTarget,
-        bytes32 _key,
-        bool _wasExecuted,
-        bool _isIncrease
-    ) internal {
-        if (_callbackTarget == address(0)) {
-            return;
-        }
-
-        if (!_callbackTarget.isContract()) {
-            return;
-        }
-
-        uint256 _gasLimit = callbackGasLimit;
-
-        uint256 _customCallbackGasLimit = customCallbackGasLimits[_callbackTarget];
-
-        if (_customCallbackGasLimit > _gasLimit) {
-            _gasLimit = _customCallbackGasLimit;
-        }
-
-        if (_gasLimit == 0) {
-            return;
-        }
-
-        bool success;
-        try IPositionRouterCallbackReceiver(_callbackTarget).gmxPositionCallback{ gas: _gasLimit }(_key, _wasExecuted, _isIncrease) {
-            success = true;
-        } catch {}
-
-        emit Callback(_callbackTarget, success, _gasLimit);
+        return receivedCollateral;
     }
 }
