@@ -1,6 +1,4 @@
-// SPDX-License-Identifier: MIT
-
-pragma solidity 0.6.12;
+ pragma solidity ^0.8.0;
 
 import "../libraries/math/SafeMath.sol";
 
@@ -13,7 +11,7 @@ contract ShortsTracker is Governable, IShortsTracker {
 
     event GlobalShortDataUpdated(address indexed token, uint256 globalShortSize, uint256 globalShortAveragePrice);
 
-    uint256 public constant MAX_INT256 = uint256(type(int256).max);
+    uint256 public constant MAX_INT256 = type(int256).max;
 
     IVault public vault;
 
@@ -28,7 +26,7 @@ contract ShortsTracker is Governable, IShortsTracker {
         _;
     }
 
-    constructor(address _vault) public {
+    constructor(address _vault) {
         vault = IVault(_vault);
     }
 
@@ -81,7 +79,7 @@ contract ShortsTracker is Governable, IShortsTracker {
         if (size == 0) { return (false, 0); }
 
         uint256 nextPrice = IVault(vault).getMaxPrice(_token);
-        uint256 priceDelta = averagePrice > nextPrice ? averagePrice.sub(nextPrice) : nextPrice.sub(averagePrice);
+        uint256 priceDelta = averagePrice > nextPrice ? averagePrice - nextPrice : nextPrice - averagePrice;
         uint256 delta = size.mul(priceDelta).div(averagePrice);
         bool hasProfit = averagePrice > nextPrice;
 
@@ -106,16 +104,16 @@ contract ShortsTracker is Governable, IShortsTracker {
         uint256 _sizeDelta,
         bool _isIncrease
     ) override public view returns (uint256, uint256) {
-        int256 realisedPnl = getRealisedPnl(_account,_collateralToken, _indexToken, _sizeDelta, _isIncrease);
+        int256 realisedPnl = getRealisedPnl(_account, _collateralToken, _indexToken, _sizeDelta, _isIncrease);
         uint256 averagePrice = globalShortAveragePrices[_indexToken];
-        uint256 priceDelta = averagePrice > _nextPrice ? averagePrice.sub(_nextPrice) : _nextPrice.sub(averagePrice);
+        uint256 priceDelta = averagePrice > _nextPrice ? averagePrice - _nextPrice : _nextPrice - averagePrice;
 
         uint256 nextSize;
         uint256 delta;
         // avoid stack to deep
         {
             uint256 size = vault.globalShortSizes(_indexToken);
-            nextSize = _isIncrease ? size.add(_sizeDelta) : size.sub(_sizeDelta);
+            nextSize = _isIncrease ? size + _sizeDelta : size - _sizeDelta;
 
             if (nextSize == 0) {
                 return (0, 0);
@@ -171,7 +169,7 @@ contract ShortsTracker is Governable, IShortsTracker {
 
         uint256 nextAveragePrice = _nextPrice
             .mul(_nextSize)
-            .div(hasProfit ? _nextSize.sub(nextDelta) : _nextSize.add(nextDelta));
+            .div(hasProfit ? _nextSize - nextDelta : _nextSize + nextDelta);
 
         return nextAveragePrice;
     }
@@ -194,26 +192,26 @@ contract ShortsTracker is Governable, IShortsTracker {
             // global shorts pnl is positive
             if (_realisedPnl > 0) {
                 if (uint256(_realisedPnl) > _delta) {
-                    _delta = uint256(_realisedPnl).sub(_delta);
+                    _delta = uint256(_realisedPnl) - _delta;
                     hasProfit = false;
                 } else {
-                    _delta = _delta.sub(uint256(_realisedPnl));
+                    _delta = _delta - uint256(_realisedPnl);
                 }
             } else {
-                _delta = _delta.add(uint256(-_realisedPnl));
+                _delta = _delta + uint256(-_realisedPnl);
             }
 
             return (hasProfit, _delta);
         }
 
         if (_realisedPnl > 0) {
-            _delta = _delta.add(uint256(_realisedPnl));
+            _delta = _delta + uint256(_realisedPnl);
         } else {
             if (uint256(-_realisedPnl) > _delta) {
-                _delta = uint256(-_realisedPnl).sub(_delta);
+                _delta = uint256(-_realisedPnl) - _delta;
                 hasProfit = true;
             } else {
-                _delta = _delta.sub(uint256(-_realisedPnl));
+                _delta = _delta - uint256(-_realisedPnl);
             }
         }
         return (hasProfit, _delta);

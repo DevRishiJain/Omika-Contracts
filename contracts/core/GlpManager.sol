@@ -1,36 +1,20 @@
-// SPDX-License-Identifier: MIT
-
-import "../libraries/math/SafeMath.sol";
-import "../libraries/token/IERC20.sol";
-import "../libraries/token/SafeERC20.sol";
-import "../libraries/utils/ReentrancyGuard.sol";
-
-import "./interfaces/IVault.sol";
-import "./interfaces/IGlpManager.sol";
-import "./interfaces/IShortsTracker.sol";
-import "../tokens/interfaces/IUSDG.sol";
-import "../tokens/interfaces/IMintable.sol";
-import "../access/Governable.sol";
+ // SPDX-License-Identifier: MIT
 
 pragma solidity 0.6.12;
 
-contract GlpManager is ReentrancyGuard, Governable, IGlpManager {
-    using SafeMath for uint256;
-    using SafeERC20 for IERC20;
-
+contract GlpManager {
     uint256 public constant PRICE_PRECISION = 10 ** 30;
     uint256 public constant USDG_DECIMALS = 18;
     uint256 public constant GLP_PRECISION = 10 ** 18;
     uint256 public constant MAX_COOLDOWN_DURATION = 48 hours;
     uint256 public constant BASIS_POINTS_DIVISOR = 10000;
 
-    IVault public override vault;
-    IShortsTracker public shortsTracker;
-    address public override usdg;
-    address public override glp;
+    address public vault;
+    address public shortsTracker;
+    address public usdg;
+    address public glp;
 
-    uint256 public override cooldownDuration;
-    mapping (address => uint256) public override lastAddedAt;
+    uint256 public cooldownDuration;
 
     uint256 public aumAddition;
     uint256 public aumDeduction;
@@ -60,201 +44,168 @@ contract GlpManager is ReentrancyGuard, Governable, IGlpManager {
     );
 
     constructor(address _vault, address _usdg, address _glp, address _shortsTracker, uint256 _cooldownDuration) public {
-        gov = msg.sender;
-        vault = IVault(_vault);
+        vault = _vault;
         usdg = _usdg;
         glp = _glp;
-        shortsTracker = IShortsTracker(_shortsTracker);
+        shortsTracker = _shortsTracker;
         cooldownDuration = _cooldownDuration;
     }
 
-    function setInPrivateMode(bool _inPrivateMode) external onlyGov {
+    function setInPrivateMode(bool _inPrivateMode) external {
         inPrivateMode = _inPrivateMode;
     }
 
-    function setShortsTracker(IShortsTracker _shortsTracker) external onlyGov {
+    function setShortsTracker(address _shortsTracker) external {
         shortsTracker = _shortsTracker;
     }
 
-    function setShortsTrackerAveragePriceWeight(uint256 _shortsTrackerAveragePriceWeight) external override onlyGov {
-        require(shortsTrackerAveragePriceWeight <= BASIS_POINTS_DIVISOR, "GlpManager: invalid weight");
+    function setShortsTrackerAveragePriceWeight(uint256 _shortsTrackerAveragePriceWeight) external {
+        require(_shortsTrackerAveragePriceWeight <= BASIS_POINTS_DIVISOR, "GlpManager: invalid weight");
         shortsTrackerAveragePriceWeight = _shortsTrackerAveragePriceWeight;
     }
 
-    function setHandler(address _handler, bool _isActive) external onlyGov {
+    function setHandler(address _handler, bool _isActive) external {
         isHandler[_handler] = _isActive;
     }
 
-    function setCooldownDuration(uint256 _cooldownDuration) external override onlyGov {
+    function setCooldownDuration(uint256 _cooldownDuration) external {
         require(_cooldownDuration <= MAX_COOLDOWN_DURATION, "GlpManager: invalid _cooldownDuration");
         cooldownDuration = _cooldownDuration;
     }
 
-    function setAumAdjustment(uint256 _aumAddition, uint256 _aumDeduction) external onlyGov {
+    function setAumAdjustment(uint256 _aumAddition, uint256 _aumDeduction) external {
         aumAddition = _aumAddition;
         aumDeduction = _aumDeduction;
     }
 
-    function addLiquidity(address _token, uint256 _amount, uint256 _minUsdg, uint256 _minGlp) external override nonReentrant returns (uint256) {
+    function addLiquidity(address _token, uint256 _amount, uint256 _minUsdg, uint256 _minGlp) external returns (uint256) {
         if (inPrivateMode) { revert("GlpManager: action not enabled"); }
         return _addLiquidity(msg.sender, msg.sender, _token, _amount, _minUsdg, _minGlp);
     }
 
-    function addLiquidityForAccount(address _fundingAccount, address _account, address _token, uint256 _amount, uint256 _minUsdg, uint256 _minGlp) external override nonReentrant returns (uint256) {
+    function addLiquidityForAccount(address _fundingAccount, address _account, address _token, uint256 _amount, uint256 _minUsdg, uint256 _minGlp) external returns (uint256) {
         _validateHandler();
         return _addLiquidity(_fundingAccount, _account, _token, _amount, _minUsdg, _minGlp);
     }
 
-    function removeLiquidity(address _tokenOut, uint256 _glpAmount, uint256 _minOut, address _receiver) external override nonReentrant returns (uint256) {
+    function _addLiquidity(address _fundingAccount, address _account, address _token, uint256 _amount, uint256 _minUsdg, uint256 _minGlp) internal returns (uint256) {
+        require(isHandler[_account] || isHandler[_fundingAccount], "GlpManager: unauthorized");
+        uint256 glpAmount = _calcGlpOutGivenTokenIn(_token, _amount);
+        require(glpAmount >= _minGlp, "GlpManager: slippage");
+        uint256 aumInUsdg = _calcAumInUsdg(_token, _amount);
+        require(aumInUsdg >= _minUsdg, "GlpManager: minUsdg");
+
+        _transferFrom(_token, _fundingAccount, address(this), _amount);
+        _mintGlp(_account, glpAmount);
+        _mintUsdg(_account, aumInUsdg);
+
+        emit AddLiquidity(_account, _token, _amount, aumInUsdg, IERC20(glp).totalSupply(), _calcUsdgOutGivenGlpIn(glpAmount), glpAmount);
+
+        return glpAmount;
+    }
+
+    function removeLiquidity(address _token, uint256 _glpAmount, uint256 _minUsdg, uint256 _minToken) external returns (uint256, uint256) {
         if (inPrivateMode) { revert("GlpManager: action not enabled"); }
-        return _removeLiquidity(msg.sender, _tokenOut, _glpAmount, _minOut, _receiver);
+        return _removeLiquidity(msg.sender, msg.sender, _token, _glpAmount, _minUsdg, _minToken);
     }
 
-    function removeLiquidityForAccount(address _account, address _tokenOut, uint256 _glpAmount, uint256 _minOut, address _receiver) external override nonReentrant returns (uint256) {
+    function removeLiquidityToAccount(address _account, address _token, uint256 _glpAmount, uint256 _minUsdg, uint256 _minToken) external returns (uint256, uint256) {
         _validateHandler();
-        return _removeLiquidity(_account, _tokenOut, _glpAmount, _minOut, _receiver);
+        return _removeLiquidity(msg.sender, _account, _token, _glpAmount, _minUsdg, _minToken);
     }
 
-    function getPrice(bool _maximise) external view returns (uint256) {
-        uint256 aum = getAum(_maximise);
-        uint256 supply = IERC20(glp).totalSupply();
-        return aum.mul(GLP_PRECISION).div(supply);
+    function _removeLiquidity(address _account, address _recipient, address _token, uint256 _glpAmount, uint256 _minUsdg, uint256 _minToken) internal returns (uint256, uint256) {
+        require(isHandler[_account], "GlpManager: unauthorized");
+        require(_glpAmount <= IERC20(glp).balanceOf(_account), "GlpManager: not enough GLP");
+
+        uint256 usdgOut = _calcUsdgOutGivenGlpIn(_glpAmount);
+        uint256 tokenOut = _calcTokenOutGivenGlpIn(_token, _glpAmount);
+        require(usdgOut >= _minUsdg, "GlpManager: slippage (USDG)");
+        require(tokenOut >= _minToken, "GlpManager: slippage (Token)");
+
+        _burnGlp(_account, _glpAmount);
+        _burnUsdg(_account, usdgOut);
+        _transfer(_token, _recipient, tokenOut);
+
+        emit RemoveLiquidity(_account, _token, _glpAmount, usdgOut, IERC20(glp).totalSupply(), tokenOut, usdgOut);
+
+        return (usdgOut, tokenOut);
     }
 
-    function getAums() public view returns (uint256[] memory) {
-        uint256[] memory amounts = new uint256[](2);
-        amounts[0] = getAum(true);
-        amounts[1] = getAum(false);
-        return amounts;
+    function _calcAumInUsdg(address _token, uint256 _amount) internal view returns (uint256) {
+        uint256 price = _getTokenPrice(_token);
+        return _amount.mul(price).div(PRICE_PRECISION);
     }
 
-    function getAumInUsdg(bool maximise) public override view returns (uint256) {
-        uint256 aum = getAum(maximise);
-        return aum.mul(10 ** USDG_DECIMALS).div(PRICE_PRECISION);
+    function _calcGlpOutGivenTokenIn(address _token, uint256 _amount) internal view returns (uint256) {
+        uint256 usdgValue = _calcAumInUsdg(_token, _amount);
+        return _calcGlpOutGivenUsdgIn(usdgValue);
     }
 
-    function getAum(bool maximise) public view returns (uint256) {
-        uint256 length = vault.allWhitelistedTokensLength();
-        uint256 aum = aumAddition;
-        uint256 shortProfits = 0;
-        IVault _vault = vault;
-
-        for (uint256 i = 0; i < length; i++) {
-            address token = vault.allWhitelistedTokens(i);
-            bool isWhitelisted = vault.whitelistedTokens(token);
-
-            if (!isWhitelisted) {
-                continue;
-            }
-
-            uint256 price = maximise ? _vault.getMaxPrice(token) : _vault.getMinPrice(token);
-            uint256 poolAmount = _vault.poolAmounts(token);
-            uint256 decimals = _vault.tokenDecimals(token);
-
-            if (_vault.stableTokens(token)) {
-                aum = aum.add(poolAmount.mul(price).div(10 ** decimals));
-            } else {
-                // add global short profit / loss
-                uint256 size = _vault.globalShortSizes(token);
-
-                if (size > 0) {
-                    (uint256 delta, bool hasProfit) = getGlobalShortDelta(token, price, size);
-                    if (!hasProfit) {
-                        // add losses from shorts
-                        aum = aum.add(delta);
-                    } else {
-                        shortProfits = shortProfits.add(delta);
-                    }
-                }
-
-                aum = aum.add(_vault.guaranteedUsd(token));
-
-                uint256 reservedAmount = _vault.reservedAmounts(token);
-                aum = aum.add(poolAmount.sub(reservedAmount).mul(price).div(10 ** decimals));
-            }
-        }
-
-        aum = shortProfits > aum ? 0 : aum.sub(shortProfits);
-        return aumDeduction > aum ? 0 : aum.sub(aumDeduction);
-    }
-
-    function getGlobalShortDelta(address _token, uint256 _price, uint256 _size) public view returns (uint256, bool) {
-        uint256 averagePrice = getGlobalShortAveragePrice(_token);
-        uint256 priceDelta = averagePrice > _price ? averagePrice.sub(_price) : _price.sub(averagePrice);
-        uint256 delta = _size.mul(priceDelta).div(averagePrice);
-        return (delta, averagePrice > _price);
-    }
-
-    function getGlobalShortAveragePrice(address _token) public view returns (uint256) {
-        IShortsTracker _shortsTracker = shortsTracker;
-        if (address(_shortsTracker) == address(0) || !_shortsTracker.isGlobalShortDataReady()) {
-            return vault.globalShortAveragePrices(_token);
-        }
-
-        uint256 _shortsTrackerAveragePriceWeight = shortsTrackerAveragePriceWeight;
-        if (_shortsTrackerAveragePriceWeight == 0) {
-            return vault.globalShortAveragePrices(_token);
-        } else if (_shortsTrackerAveragePriceWeight == BASIS_POINTS_DIVISOR) {
-            return _shortsTracker.globalShortAveragePrices(_token);
-        }
-
-        uint256 vaultAveragePrice = vault.globalShortAveragePrices(_token);
-        uint256 shortsTrackerAveragePrice = _shortsTracker.globalShortAveragePrices(_token);
-
-        return vaultAveragePrice.mul(BASIS_POINTS_DIVISOR.sub(_shortsTrackerAveragePriceWeight))
-            .add(shortsTrackerAveragePrice.mul(_shortsTrackerAveragePriceWeight))
-            .div(BASIS_POINTS_DIVISOR);
-    }
-
-    function _addLiquidity(address _fundingAccount, address _account, address _token, uint256 _amount, uint256 _minUsdg, uint256 _minGlp) private returns (uint256) {
-        require(_amount > 0, "GlpManager: invalid _amount");
-
-        // calculate aum before buyUSDG
-        uint256 aumInUsdg = getAumInUsdg(true);
+    function _calcGlpOutGivenUsdgIn(uint256 _usdgAmount) internal view returns (uint256) {
+        uint256 usdgSupply = IERC20(usdg).totalSupply();
         uint256 glpSupply = IERC20(glp).totalSupply();
-
-        IERC20(_token).safeTransferFrom(_fundingAccount, address(vault), _amount);
-        uint256 usdgAmount = vault.buyUSDG(_token, address(this));
-        require(usdgAmount >= _minUsdg, "GlpManager: insufficient USDG output");
-
-        uint256 mintAmount = aumInUsdg == 0 ? usdgAmount : usdgAmount.mul(glpSupply).div(aumInUsdg);
-        require(mintAmount >= _minGlp, "GlpManager: insufficient GLP output");
-
-        IMintable(glp).mint(_account, mintAmount);
-
-        lastAddedAt[_account] = block.timestamp;
-
-        emit AddLiquidity(_account, _token, _amount, aumInUsdg, glpSupply, usdgAmount, mintAmount);
-
-        return mintAmount;
-    }
-
-    function _removeLiquidity(address _account, address _tokenOut, uint256 _glpAmount, uint256 _minOut, address _receiver) private returns (uint256) {
-        require(_glpAmount > 0, "GlpManager: invalid _glpAmount");
-        require(lastAddedAt[_account].add(cooldownDuration) <= block.timestamp, "GlpManager: cooldown duration not yet passed");
-
-        // calculate aum before sellUSDG
-        uint256 aumInUsdg = getAumInUsdg(false);
-        uint256 glpSupply = IERC20(glp).totalSupply();
-
-        uint256 usdgAmount = _glpAmount.mul(aumInUsdg).div(glpSupply);
-        uint256 usdgBalance = IERC20(usdg).balanceOf(address(this));
-        if (usdgAmount > usdgBalance) {
-            IUSDG(usdg).mint(address(this), usdgAmount.sub(usdgBalance));
+        if (usdgSupply == 0 || glpSupply == 0) {
+            return _usdgAmount;
         }
-
-        IMintable(glp).burn(_account, _glpAmount);
-
-        IERC20(usdg).transfer(address(vault), usdgAmount);
-        uint256 amountOut = vault.sellUSDG(_tokenOut, _receiver);
-        require(amountOut >= _minOut, "GlpManager: insufficient output");
-
-        emit RemoveLiquidity(_account, _tokenOut, _glpAmount, aumInUsdg, glpSupply, usdgAmount, amountOut);
-
-        return amountOut;
+        uint256 effectiveUsdgAmount = _usdgAmount.sub(aumDeduction).add(aumAddition);
+        uint256 mintAmount = effectiveUsdgAmount.mul(glpSupply).div(usdgSupply);
+        return mintAmount.mul(GLP_PRECISION).div(PRICE_PRECISION);
     }
 
-    function _validateHandler() private view {
-        require(isHandler[msg.sender], "GlpManager: forbidden");
+    function _calcUsdgOutGivenGlpIn(uint256 _glpAmount) internal view returns (uint256) {
+        uint256 usdgSupply = IERC20(usdg).totalSupply();
+        uint256 glpSupply = IERC20(glp).totalSupply();
+        if (usdgSupply == 0 || glpSupply == 0) {
+            return _glpAmount;
+        }
+        uint256 usdgAmount = _glpAmount.mul(usdgSupply).mul(PRICE_PRECISION).div(glpSupply).div(GLP_PRECISION);
+        return usdgAmount.sub(aumAddition).add(aumDeduction);
+    }
+
+    function _calcTokenOutGivenGlpIn(address _token, uint256 _glpAmount) internal view returns (uint256) {
+        uint256 price = _getTokenPrice(_token);
+        return _glpAmount.mul(price).div(PRICE_PRECISION);
+    }
+
+    function _getTokenPrice(address _token) internal view returns (uint256) {
+        (bool success, bytes memory data) = _token.staticcall(abi.encodeWithSignature("price()"));
+        if (!success) { revert("GlpManager: invalid token"); }
+        return abi.decode(data, (uint256));
+    }
+
+    function _transfer(address _token, address _recipient, uint256 _amount) internal {
+        (bool success, ) = _token.call(abi.encodeWithSignature("transfer(address,uint256)", _recipient, _amount));
+        if (!success) { revert("GlpManager: transfer failed"); }
+    }
+
+    function _transferFrom(address _token, address _sender, address _recipient, uint256 _amount) internal {
+        (bool success, ) = _token.call(abi.encodeWithSignature("transferFrom(address,address,uint256)", _sender, _recipient, _amount));
+        if (!success) { revert("GlpManager: transferFrom failed"); }
+    }
+
+    function _mintGlp(address _account, uint256 _amount) internal {
+        (bool success, ) = glp.call(abi.encodeWithSignature("mint(address,uint256)", _account, _amount));
+        if (!success) { revert("GlpManager: mint GLP failed"); }
+    }
+
+    function _burnGlp(address _account, uint256 _amount) internal {
+        (bool success, ) = glp.call(abi.encodeWithSignature("burn(address,uint256)", _account, _amount));
+        if (!success) { revert("GlpManager: burn GLP failed"); }
+    }
+
+    function _mintUsdg(address _account, uint256 _amount) internal {
+        (bool success, ) = usdg.call(abi.encodeWithSignature("mint(address,uint256)", _account, _amount));
+        if (!success) { revert("GlpManager: mint USDG failed"); }
+    }
+
+    function _burnUsdg(address _account, uint256 _amount) internal {
+        (bool success, ) = usdg.call(abi.encodeWithSignature("burn(address,uint256)", _account, _amount));
+        if (!success) { revert("GlpManager: burn USDG failed"); }
+    }
+
+    function _validateHandler() internal view {
+        require(isHandler[msg.sender], "GlpManager: unauthorized handler");
     }
 }
+ 

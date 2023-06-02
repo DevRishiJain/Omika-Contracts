@@ -1,6 +1,4 @@
-// SPDX-License-Identifier: MIT
-
-pragma solidity 0.6.12;
+ pragma solidity ^0.8.0;
 
 import "../libraries/math/SafeMath.sol";
 import "../libraries/token/IERC20.sol";
@@ -27,8 +25,8 @@ contract VaultUtils is IVaultUtils, Governable {
     uint256 public constant BASIS_POINTS_DIVISOR = 10000;
     uint256 public constant FUNDING_RATE_PRECISION = 1000000;
 
-    constructor(IVault _vault) public {
-        vault = _vault;
+    constructor(address _vault) {
+        vault = IVault(_vault);
     }
 
     function updateCumulativeFundingRate(address /* _collateralToken */, address /* _indexToken */) public override returns (bool) {

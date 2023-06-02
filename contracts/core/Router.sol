@@ -1,15 +1,15 @@
-// SPDX-License-Identifier: MIT
+ // SPDX-License-Identifier: MIT
 
-pragma solidity 0.6.12;
+pragma solidity ^0.8.0;
 
-import "../libraries/math/SafeMath.sol";
-import "../libraries/token/IERC20.sol";
-import "../libraries/token/SafeERC20.sol";
-import "../libraries/utils/Address.sol";
+import "./libraries/math/SafeMath.sol";
+import "./libraries/token/IERC20.sol";
+import "./libraries/token/SafeERC20.sol";
+import "./libraries/utils/Address.sol";
 
-import "../tokens/interfaces/IWETH.sol";
-import "./interfaces/IVault.sol";
-import "./interfaces/IRouter.sol";
+import "./tokens/interfaces/IWETH.sol";
+import "./vault/interfaces/IVault.sol";
+import "./router/interfaces/IRouter.sol";
 
 contract Router is IRouter {
     using SafeMath for uint256;
@@ -18,13 +18,13 @@ contract Router is IRouter {
 
     address public gov;
 
-    // wrapped BNB / ETH
+    // Wrapped BNB / ETH
     address public weth;
     address public usdg;
     address public vault;
 
-    mapping (address => bool) public plugins;
-    mapping (address => mapping (address => bool)) public approvedPlugins;
+    mapping(address => bool) public plugins;
+    mapping(address => mapping(address => bool)) public approvedPlugins;
 
     event Swap(address account, address tokenIn, address tokenOut, uint256 amountIn, uint256 amountOut);
 
@@ -33,11 +33,10 @@ contract Router is IRouter {
         _;
     }
 
-    constructor(address _vault, address _usdg, address _weth) public {
+    constructor(address _vault, address _usdg, address _weth) {
         vault = _vault;
         usdg = _usdg;
         weth = _weth;
-
         gov = msg.sender;
     }
 
@@ -65,157 +64,163 @@ contract Router is IRouter {
         approvedPlugins[msg.sender][_plugin] = false;
     }
 
-    function pluginTransfer(address _token, address _account, address _receiver, uint256 _amount) external override {
+    function pluginTransfer(
+        address _token,
+        address _account,
+        address _receiver,
+        uint256 _amount
+    ) external override {
         _validatePlugin(_account);
         IERC20(_token).safeTransferFrom(_account, _receiver, _amount);
     }
 
-    function pluginIncreasePosition(address _account, address _collateralToken, address _indexToken, uint256 _sizeDelta, bool _isLong) external override {
+    function pluginIncreasePosition(
+        address _account,
+        address _collateralToken,
+        address _indexToken,
+        uint256 _sizeDelta,
+        bool _isLong
+    ) external override {
         _validatePlugin(_account);
         IVault(vault).increasePosition(_account, _collateralToken, _indexToken, _sizeDelta, _isLong);
     }
 
-    function pluginDecreasePosition(address _account, address _collateralToken, address _indexToken, uint256 _collateralDelta, uint256 _sizeDelta, bool _isLong, address _receiver) external override returns (uint256) {
+    function pluginDecreasePosition(
+        address _account,
+        address _collateralToken,
+        address _indexToken,
+        uint256 _collateralDelta,
+        uint256 _sizeDelta,
+        bool _isLong,
+        address _receiver
+    ) external override returns (uint256) {
         _validatePlugin(_account);
-        return IVault(vault).decreasePosition(_account, _collateralToken, _indexToken, _collateralDelta, _sizeDelta, _isLong, _receiver);
+        return
+            IVault(vault).decreasePosition(
+                _account,
+                _collateralToken,
+                _indexToken,
+                _collateralDelta,
+                _sizeDelta,
+                _isLong,
+                _receiver
+            );
     }
 
-    function directPoolDeposit(address _token, uint256 _amount) external {
-        IERC20(_token).safeTransferFrom(_sender(), vault, _amount);
-        IVault(vault).directPoolDeposit(_token);
-    }
+    function directPoolSwap(
+        address[] calldata _path,
+        uint256 _amountIn,
+        uint256 _amountOutMin,
+        address _receiver
+    ) external override {
+        address tokenIn = _path[0];
+        address tokenOut = _path[_path.length - 1];
+        require(tokenIn != tokenOut, "Router: invalid path");
 
-    function swap(address[] memory _path, uint256 _amountIn, uint256 _minOut, address _receiver) public override {
-        IERC20(_path[0]).safeTransferFrom(_sender(), vault, _amountIn);
-        uint256 amountOut = _swap(_path, _minOut, _receiver);
-        emit Swap(msg.sender, _path[0], _path[_path.length - 1], _amountIn, amountOut);
-    }
-
-    function swapETHToTokens(address[] memory _path, uint256 _minOut, address _receiver) external payable {
-        require(_path[0] == weth, "Router: invalid _path");
-        _transferETHToVault();
-        uint256 amountOut = _swap(_path, _minOut, _receiver);
-        emit Swap(msg.sender, _path[0], _path[_path.length - 1], msg.value, amountOut);
-    }
-
-    function swapTokensToETH(address[] memory _path, uint256 _amountIn, uint256 _minOut, address payable _receiver) external {
-        require(_path[_path.length - 1] == weth, "Router: invalid _path");
-        IERC20(_path[0]).safeTransferFrom(_sender(), vault, _amountIn);
-        uint256 amountOut = _swap(_path, _minOut, address(this));
-        _transferOutETH(amountOut, _receiver);
-        emit Swap(msg.sender, _path[0], _path[_path.length - 1], _amountIn, amountOut);
-    }
-
-    function increasePosition(address[] memory _path, address _indexToken, uint256 _amountIn, uint256 _minOut, uint256 _sizeDelta, bool _isLong, uint256 _price) external {
         if (_amountIn > 0) {
-            IERC20(_path[0]).safeTransferFrom(_sender(), vault, _amountIn);
-        }
-        if (_path.length > 1 && _amountIn > 0) {
-            uint256 amountOut = _swap(_path, _minOut, address(this));
-            IERC20(_path[_path.length - 1]).safeTransfer(vault, amountOut);
-        }
-        _increasePosition(_path[_path.length - 1], _indexToken, _sizeDelta, _isLong, _price);
-    }
-
-    function increasePositionETH(address[] memory _path, address _indexToken, uint256 _minOut, uint256 _sizeDelta, bool _isLong, uint256 _price) external payable {
-        require(_path[0] == weth, "Router: invalid _path");
-        if (msg.value > 0) {
-            _transferETHToVault();
-        }
-        if (_path.length > 1 && msg.value > 0) {
-            uint256 amountOut = _swap(_path, _minOut, address(this));
-            IERC20(_path[_path.length - 1]).safeTransfer(vault, amountOut);
-        }
-        _increasePosition(_path[_path.length - 1], _indexToken, _sizeDelta, _isLong, _price);
-    }
-
-    function decreasePosition(address _collateralToken, address _indexToken, uint256 _collateralDelta, uint256 _sizeDelta, bool _isLong, address _receiver, uint256 _price) external {
-        _decreasePosition(_collateralToken, _indexToken, _collateralDelta, _sizeDelta, _isLong, _receiver, _price);
-    }
-
-    function decreasePositionETH(address _collateralToken, address _indexToken, uint256 _collateralDelta, uint256 _sizeDelta, bool _isLong, address payable _receiver, uint256 _price) external {
-        uint256 amountOut = _decreasePosition(_collateralToken, _indexToken, _collateralDelta, _sizeDelta, _isLong, address(this), _price);
-        _transferOutETH(amountOut, _receiver);
-    }
-
-    function decreasePositionAndSwap(address[] memory _path, address _indexToken, uint256 _collateralDelta, uint256 _sizeDelta, bool _isLong, address _receiver, uint256 _price, uint256 _minOut) external {
-        uint256 amount = _decreasePosition(_path[0], _indexToken, _collateralDelta, _sizeDelta, _isLong, address(this), _price);
-        IERC20(_path[0]).safeTransfer(vault, amount);
-        _swap(_path, _minOut, _receiver);
-    }
-
-    function decreasePositionAndSwapETH(address[] memory _path, address _indexToken, uint256 _collateralDelta, uint256 _sizeDelta, bool _isLong, address payable _receiver, uint256 _price, uint256 _minOut) external {
-        require(_path[_path.length - 1] == weth, "Router: invalid _path");
-        uint256 amount = _decreasePosition(_path[0], _indexToken, _collateralDelta, _sizeDelta, _isLong, address(this), _price);
-        IERC20(_path[0]).safeTransfer(vault, amount);
-        uint256 amountOut = _swap(_path, _minOut, address(this));
-        _transferOutETH(amountOut, _receiver);
-    }
-
-    function _increasePosition(address _collateralToken, address _indexToken, uint256 _sizeDelta, bool _isLong, uint256 _price) private {
-        if (_isLong) {
-            require(IVault(vault).getMaxPrice(_indexToken) <= _price, "Router: mark price higher than limit");
-        } else {
-            require(IVault(vault).getMinPrice(_indexToken) >= _price, "Router: mark price lower than limit");
+            IERC20(tokenIn).safeTransferFrom(msg.sender, address(this), _amountIn);
         }
 
-        IVault(vault).increasePosition(_sender(), _collateralToken, _indexToken, _sizeDelta, _isLong);
-    }
+        uint256 amountOut = _directPoolSwap(_path, _amountIn, _amountOutMin);
 
-    function _decreasePosition(address _collateralToken, address _indexToken, uint256 _collateralDelta, uint256 _sizeDelta, bool _isLong, address _receiver, uint256 _price) private returns (uint256) {
-        if (_isLong) {
-            require(IVault(vault).getMinPrice(_indexToken) >= _price, "Router: mark price lower than limit");
-        } else {
-            require(IVault(vault).getMaxPrice(_indexToken) <= _price, "Router: mark price higher than limit");
+        if (amountOut > 0) {
+            if (tokenOut == weth) {
+                IWETH(weth).withdraw(amountOut);
+                payable(_receiver).sendValue(amountOut);
+            } else {
+                IERC20(tokenOut).safeTransfer(_receiver, amountOut);
+            }
         }
 
-        return IVault(vault).decreasePosition(_sender(), _collateralToken, _indexToken, _collateralDelta, _sizeDelta, _isLong, _receiver);
+        emit Swap(msg.sender, tokenIn, tokenOut, _amountIn, amountOut);
     }
 
-    function _transferETHToVault() private {
-        IWETH(weth).deposit{value: msg.value}();
-        IERC20(weth).safeTransfer(vault, msg.value);
-    }
+    function _directPoolSwap(
+        address[] memory _path,
+        uint256 _amountIn,
+        uint256 _amountOutMin
+    ) internal returns (uint256) {
+        for (uint256 i = 0; i < _path.length - 1; i++) {
+            address tokenIn = _path[i];
+            address tokenOut = _path[i + 1];
+            (uint256 reserveIn, uint256 reserveOut) = _getReserves(tokenIn, tokenOut);
 
-    function _transferOutETH(uint256 _amountOut, address payable _receiver) private {
-        IWETH(weth).withdraw(_amountOut);
-        _receiver.sendValue(_amountOut);
-    }
+            uint256 amountOut = _getAmountOut(_amountIn, reserveIn, reserveOut);
+            require(amountOut >= _amountOutMin, "Router: insufficient output amount");
 
-    function _swap(address[] memory _path, uint256 _minOut, address _receiver) private returns (uint256) {
-        if (_path.length == 2) {
-            return _vaultSwap(_path[0], _path[1], _minOut, _receiver);
-        }
-        if (_path.length == 3) {
-            uint256 midOut = _vaultSwap(_path[0], _path[1], 0, address(this));
-            IERC20(_path[1]).safeTransfer(vault, midOut);
-            return _vaultSwap(_path[1], _path[2], _minOut, _receiver);
-        }
+            (uint256 amountInNext, uint256 amountOutNext) =
+                _calculateSwap(tokenIn, tokenOut, _amountIn, amountOut, reserveIn, reserveOut);
+            _amountIn = amountInNext;
 
-        revert("Router: invalid _path.length");
-    }
-
-    function _vaultSwap(address _tokenIn, address _tokenOut, uint256 _minOut, address _receiver) private returns (uint256) {
-        uint256 amountOut;
-
-        if (_tokenOut == usdg) { // buyUSDG
-            amountOut = IVault(vault).buyUSDG(_tokenIn, _receiver);
-        } else if (_tokenIn == usdg) { // sellUSDG
-            amountOut = IVault(vault).sellUSDG(_tokenOut, _receiver);
-        } else { // swap
-            amountOut = IVault(vault).swap(_tokenIn, _tokenOut, _receiver);
+            emit Swap(address(this), tokenIn, tokenOut, _amountIn, amountOutNext);
         }
 
-        require(amountOut >= _minOut, "Router: insufficient amountOut");
-        return amountOut;
+        return _amountIn;
     }
 
-    function _sender() private view returns (address) {
-        return msg.sender;
+    function _calculateSwap(
+        address _tokenIn,
+        address _tokenOut,
+        uint256 _amountIn,
+        uint256 _amountOut,
+        uint256 _reserveIn,
+        uint256 _reserveOut
+    ) internal returns (uint256, uint256) {
+        if (_tokenIn == weth && _tokenOut == weth) {
+            return (_amountIn, _amountOut);
+        }
+
+        if (_tokenIn == weth) {
+            address[] memory path = new address[](2);
+            path[0] = weth;
+            path[1] = _tokenOut;
+
+            uint256[] memory amounts = _swapExactTokensForTokens(_amountIn, _amountOut, path, address(this));
+            return (_amountsIn(amounts), amounts[amounts.length - 1]);
+        }
+
+        if (_tokenOut == weth) {
+            address[] memory path = new address[](2);
+            path[0] = _tokenIn;
+            path[1] = weth;
+
+            uint256[] memory amounts = _swapExactTokensForTokens(_amountIn, _amountOut, path, address(this));
+            return (_amountsIn(amounts), amounts[amounts.length - 1]);
+        }
+
+        address[] memory path = new address[](3);
+        path[0] = _tokenIn;
+        path[1] = weth;
+        path[2] = _tokenOut;
+
+        uint256[] memory amounts = _swapExactTokensForTokens(_amountIn, _amountOut, path, address(this));
+        return (_amountsIn(amounts), amounts[amounts.length - 1]);
     }
 
-    function _validatePlugin(address _account) private view {
-        require(plugins[msg.sender], "Router: invalid plugin");
-        require(approvedPlugins[_account][msg.sender], "Router: plugin not approved");
+    function _amountsIn(uint256[] memory amounts) internal pure returns (uint256) {
+        uint256 sum = 0;
+        for (uint256 i = 0; i < amounts.length - 1; i++) {
+            sum += amounts[i];
+        }
+        return sum;
+    }
+
+    function _getAmountOut(
+        uint256 _amountIn,
+        uint256 _reserveIn,
+        uint256 _reserveOut
+    ) internal pure returns (uint256) {
+        uint256 amountInWithFee = _amountIn.mul(997);
+        uint256 numerator = amountInWithFee.mul(_reserveOut);
+        uint256 denominator = _reserveIn.mul(1000).add(amountInWithFee);
+        return numerator / denominator;
+    }
+
+    function _getReserves(address _tokenA, address _tokenB) internal view returns (uint256, uint256) {
+        return IVault(vault).getReserves(_tokenA, _tokenB);
+    }
+
+    function _validatePlugin(address _plugin) internal view {
+        require(plugins[_plugin] || approvedPlugins[msg.sender][_plugin], "Router: plugin not allowed");
     }
 }

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+ // SPDX-License-Identifier: MIT
 
 import "../libraries/math/SafeMath.sol";
 
@@ -84,16 +84,16 @@ contract VaultPriceFeed is IVaultPriceFeed {
         lastAdjustmentTimings[_token] = block.timestamp;
     }
 
-    function setUseV2Pricing(bool _useV2Pricing) external override onlyGov {
+    function setUseV2Pricing(bool _useV2Pricing) external onlyGov {
         useV2Pricing = _useV2Pricing;
     }
 
-    function setIsAmmEnabled(bool _isEnabled) external override onlyGov {
-        isAmmEnabled = _isEnabled;
+    function setIsAmmEnabled(bool _isAmmEnabled) external onlyGov {
+        isAmmEnabled = _isAmmEnabled;
     }
 
-    function setIsSecondaryPriceEnabled(bool _isEnabled) external override onlyGov {
-        isSecondaryPriceEnabled = _isEnabled;
+    function setIsSecondaryPriceEnabled(bool _isSecondaryPriceEnabled) external onlyGov {
+        isSecondaryPriceEnabled = _isSecondaryPriceEnabled;
     }
 
     function setSecondaryPriceFeed(address _secondaryPriceFeed) external onlyGov {
@@ -112,269 +112,178 @@ contract VaultPriceFeed is IVaultPriceFeed {
         btcBnb = _btcBnb;
     }
 
-    function setSpreadBasisPoints(address _token, uint256 _spreadBasisPoints) external override onlyGov {
-        require(_spreadBasisPoints <= MAX_SPREAD_BASIS_POINTS, "VaultPriceFeed: invalid _spreadBasisPoints");
+    function setPriceFeed(address _token, address _priceFeed, uint256 _priceDecimals) external onlyGov {
+        require(_token != address(0), "VaultPriceFeed: invalid token address");
+        require(_priceFeed != address(0), "VaultPriceFeed: invalid price feed address");
+        require(_priceDecimals > 0, "VaultPriceFeed: invalid price decimals");
+        priceFeeds[_token] = _priceFeed;
+        priceDecimals[_token] = _priceDecimals;
+    }
+
+    function setSpreadBasisPoints(address _token, uint256 _spreadBasisPoints) external onlyGov {
+        require(_spreadBasisPoints <= MAX_SPREAD_BASIS_POINTS, "VaultPriceFeed: invalid spread basis points");
         spreadBasisPoints[_token] = _spreadBasisPoints;
     }
 
-    function setSpreadThresholdBasisPoints(uint256 _spreadThresholdBasisPoints) external override onlyGov {
-        spreadThresholdBasisPoints = _spreadThresholdBasisPoints;
+    function setStrictStableTokens(address[] memory _tokens, bool[] memory _isStrictStable) external onlyGov {
+        require(_tokens.length == _isStrictStable.length, "VaultPriceFeed: invalid input length");
+        for (uint256 i = 0; i < _tokens.length; i++) {
+            strictStableTokens[_tokens[i]] = _isStrictStable[i];
+        }
     }
 
-    function setFavorPrimaryPrice(bool _favorPrimaryPrice) external override onlyGov {
-        favorPrimaryPrice = _favorPrimaryPrice;
-    }
-
-    function setPriceSampleSpace(uint256 _priceSampleSpace) external override onlyGov {
-        require(_priceSampleSpace > 0, "VaultPriceFeed: invalid _priceSampleSpace");
-        priceSampleSpace = _priceSampleSpace;
-    }
-
-    function setMaxStrictPriceDeviation(uint256 _maxStrictPriceDeviation) external override onlyGov {
+    function setMaxStrictPriceDeviation(uint256 _maxStrictPriceDeviation) external onlyGov {
+        require(_maxStrictPriceDeviation <= BASIS_POINTS_DIVISOR, "VaultPriceFeed: invalid max strict price deviation");
         maxStrictPriceDeviation = _maxStrictPriceDeviation;
     }
 
-    function setTokenConfig(
-        address _token,
-        address _priceFeed,
-        uint256 _priceDecimals,
-        bool _isStrictStable
-    ) external override onlyGov {
-        priceFeeds[_token] = _priceFeed;
-        priceDecimals[_token] = _priceDecimals;
-        strictStableTokens[_token] = _isStrictStable;
+    function setSpreadThresholdBasisPoints(uint256 _spreadThresholdBasisPoints) external onlyGov {
+        require(_spreadThresholdBasisPoints <= BASIS_POINTS_DIVISOR, "VaultPriceFeed: invalid spread threshold basis points");
+        spreadThresholdBasisPoints = _spreadThresholdBasisPoints;
     }
 
-    function getPrice(address _token, bool _maximise, bool _includeAmmPrice, bool /* _useSwapPricing */) public override view returns (uint256) {
-        uint256 price = useV2Pricing ? getPriceV2(_token, _maximise, _includeAmmPrice) : getPriceV1(_token, _maximise, _includeAmmPrice);
-
+    function adjustPrice(address _token, uint256 _currentPrice) external view override returns (uint256) {
         uint256 adjustmentBps = adjustmentBasisPoints[_token];
-        if (adjustmentBps > 0) {
-            bool isAdditive = isAdjustmentAdditive[_token];
-            if (isAdditive) {
-                price = price.mul(BASIS_POINTS_DIVISOR.add(adjustmentBps)).div(BASIS_POINTS_DIVISOR);
-            } else {
-                price = price.mul(BASIS_POINTS_DIVISOR.sub(adjustmentBps)).div(BASIS_POINTS_DIVISOR);
-            }
+        if (adjustmentBps == 0) {
+            return _currentPrice;
         }
 
+        uint256 lastAdjustmentTiming = lastAdjustmentTimings[_token];
+        if (lastAdjustmentTiming == 0) {
+            return _currentPrice;
+        }
+
+        bool additive = isAdjustmentAdditive[_token];
+        if (additive) {
+            return _currentPrice.add(_currentPrice.mul(adjustmentBps).div(BASIS_POINTS_DIVISOR));
+        } else {
+            uint256 timeElapsed = block.timestamp.sub(lastAdjustmentTiming);
+            uint256 adjustment = _currentPrice.mul(adjustmentBps).div(BASIS_POINTS_DIVISOR);
+            uint256 adjustmentPerSec = adjustment.div(MAX_ADJUSTMENT_INTERVAL);
+            return _currentPrice.sub(adjustmentPerSec.mul(timeElapsed));
+        }
+    }
+
+    function getLatestPrice(address _token) public view returns (uint256) {
+        if (useV2Pricing) {
+            return getLatestPriceV2(_token);
+        } else {
+            return getLatestPriceV1(_token);
+        }
+    }
+
+    function getLatestPriceV1(address _token) public view returns (uint256) {
+        require(priceFeeds[_token] != address(0), "VaultPriceFeed: price feed not set");
+        require(priceDecimals[_token] != 0, "VaultPriceFeed: price decimals not set");
+        IPriceFeed priceFeed = IPriceFeed(priceFeeds[_token]);
+        uint256 price = priceFeed.getPrice();
+        uint256 decimals = priceDecimals[_token];
+        require(price <= uint256(-1) / PRICE_PRECISION, "VaultPriceFeed: price exceeds maximum");
+        return price.mul(PRICE_PRECISION).div(10 ** decimals);
+    }
+
+    function getLatestPriceV2(address _token) public view returns (uint256) {
+        if (isAmmEnabled && isAmmToken(_token)) {
+            return getAmmPrice(_token);
+        } else if (isSecondaryPriceEnabled && secondaryPriceFeed != address(0) && _token != address(0)) {
+            return getSecondaryPrice(_token);
+        } else {
+            return getLatestPriceV1(_token);
+        }
+    }
+
+    function getAmmPrice(address _token) internal view returns (uint256) {
+        IPancakePair ammPair = IPancakePair(getAmmPair(_token));
+        uint256 priceCumulative = ammPair.price0CumulativeLast();
+        (uint112 reserve0, uint112 reserve1, uint32 blockTimestampLast) = ammPair.getReserves();
+        if (reserve0 == 0 || reserve1 == 0) {
+            return 0;
+        }
+        if (address(ammPair.token0()) == _token) {
+            return calculatePrice(reserve1, reserve0, priceCumulative, blockTimestampLast);
+        } else {
+            return calculatePrice(reserve0, reserve1, priceCumulative, blockTimestampLast);
+        }
+    }
+
+    function calculatePrice(
+        uint256 _reserveBase,
+        uint256 _reserveQuote,
+        uint256 _priceCumulative,
+        uint256 _blockTimestampLast
+    ) internal pure returns (uint256) {
+        uint256 timeElapsed = block.timestamp - _blockTimestampLast; // overflow is desired
+        // overflow is desired, casting never truncates
+        uint256 priceAverage = uint256(SafeMath.div(_priceCumulative, timeElapsed));
+        uint256 price = priceAverage.mul(_reserveBase).div(_reserveQuote);
         return price;
     }
 
-    function getPriceV1(address _token, bool _maximise, bool _includeAmmPrice) public view returns (uint256) {
-        uint256 price = getPrimaryPrice(_token, _maximise);
-
-        if (_includeAmmPrice && isAmmEnabled) {
-            uint256 ammPrice = getAmmPrice(_token);
-            if (ammPrice > 0) {
-                if (_maximise && ammPrice > price) {
-                    price = ammPrice;
-                }
-                if (!_maximise && ammPrice < price) {
-                    price = ammPrice;
-                }
-            }
-        }
-
-        if (isSecondaryPriceEnabled) {
-            price = getSecondaryPrice(_token, price, _maximise);
-        }
-
-        if (strictStableTokens[_token]) {
-            uint256 delta = price > ONE_USD ? price.sub(ONE_USD) : ONE_USD.sub(price);
-            if (delta <= maxStrictPriceDeviation) {
-                return ONE_USD;
-            }
-
-            // if _maximise and price is e.g. 1.02, return 1.02
-            if (_maximise && price > ONE_USD) {
-                return price;
-            }
-
-            // if !_maximise and price is e.g. 0.98, return 0.98
-            if (!_maximise && price < ONE_USD) {
-                return price;
-            }
-
-            return ONE_USD;
-        }
-
-        uint256 _spreadBasisPoints = spreadBasisPoints[_token];
-
-        if (_maximise) {
-            return price.mul(BASIS_POINTS_DIVISOR.add(_spreadBasisPoints)).div(BASIS_POINTS_DIVISOR);
-        }
-
-        return price.mul(BASIS_POINTS_DIVISOR.sub(_spreadBasisPoints)).div(BASIS_POINTS_DIVISOR);
+    function getSecondaryPrice(address _token) internal view returns (uint256) {
+        ISecondaryPriceFeed priceFeed = ISecondaryPriceFeed(secondaryPriceFeed);
+        uint256 price = priceFeed.getSecondaryPrice(_token);
+        require(price <= uint256(-1) / PRICE_PRECISION, "VaultPriceFeed: price exceeds maximum");
+        return price.mul(PRICE_PRECISION);
     }
 
-    function getPriceV2(address _token, bool _maximise, bool _includeAmmPrice) public view returns (uint256) {
-        uint256 price = getPrimaryPrice(_token, _maximise);
-
-        if (_includeAmmPrice && isAmmEnabled) {
-            price = getAmmPriceV2(_token, _maximise, price);
-        }
-
-        if (isSecondaryPriceEnabled) {
-            price = getSecondaryPrice(_token, price, _maximise);
-        }
-
-        if (strictStableTokens[_token]) {
-            uint256 delta = price > ONE_USD ? price.sub(ONE_USD) : ONE_USD.sub(price);
-            if (delta <= maxStrictPriceDeviation) {
-                return ONE_USD;
-            }
-
-            // if _maximise and price is e.g. 1.02, return 1.02
-            if (_maximise && price > ONE_USD) {
-                return price;
-            }
-
-            // if !_maximise and price is e.g. 0.98, return 0.98
-            if (!_maximise && price < ONE_USD) {
-                return price;
-            }
-
-            return ONE_USD;
-        }
-
-        uint256 _spreadBasisPoints = spreadBasisPoints[_token];
-
-        if (_maximise) {
-            return price.mul(BASIS_POINTS_DIVISOR.add(_spreadBasisPoints)).div(BASIS_POINTS_DIVISOR);
-        }
-
-        return price.mul(BASIS_POINTS_DIVISOR.sub(_spreadBasisPoints)).div(BASIS_POINTS_DIVISOR);
+    function isAmmToken(address _token) internal view returns (bool) {
+        return _token == btc || _token == eth || _token == bnb;
     }
 
-    function getAmmPriceV2(address _token, bool _maximise, uint256 _primaryPrice) public view returns (uint256) {
-        uint256 ammPrice = getAmmPrice(_token);
-        if (ammPrice == 0) {
-            return _primaryPrice;
-        }
-
-        uint256 diff = ammPrice > _primaryPrice ? ammPrice.sub(_primaryPrice) : _primaryPrice.sub(ammPrice);
-        if (diff.mul(BASIS_POINTS_DIVISOR) < _primaryPrice.mul(spreadThresholdBasisPoints)) {
-            if (favorPrimaryPrice) {
-                return _primaryPrice;
-            }
-            return ammPrice;
-        }
-
-        if (_maximise && ammPrice > _primaryPrice) {
-            return ammPrice;
-        }
-
-        if (!_maximise && ammPrice < _primaryPrice) {
-            return ammPrice;
-        }
-
-        return _primaryPrice;
-    }
-
-    function getLatestPrimaryPrice(address _token) public override view returns (uint256) {
-        address priceFeedAddress = priceFeeds[_token];
-        require(priceFeedAddress != address(0), "VaultPriceFeed: invalid price feed");
-
-        IPriceFeed priceFeed = IPriceFeed(priceFeedAddress);
-
-        int256 price = priceFeed.latestAnswer();
-        require(price > 0, "VaultPriceFeed: invalid price");
-
-        return uint256(price);
-    }
-
-    function getPrimaryPrice(address _token, bool _maximise) public override view returns (uint256) {
-        address priceFeedAddress = priceFeeds[_token];
-        require(priceFeedAddress != address(0), "VaultPriceFeed: invalid price feed");
-
-        if (chainlinkFlags != address(0)) {
-            bool isRaised = IChainlinkFlags(chainlinkFlags).getFlag(FLAG_ARBITRUM_SEQ_OFFLINE);
-            if (isRaised) {
-                    // If flag is raised we shouldn't perform any critical operations
-                revert("Chainlink feeds are not being updated");
-            }
-        }
-
-        IPriceFeed priceFeed = IPriceFeed(priceFeedAddress);
-
-        uint256 price = 0;
-        uint80 roundId = priceFeed.latestRound();
-
-        for (uint80 i = 0; i < priceSampleSpace; i++) {
-            if (roundId <= i) { break; }
-            uint256 p;
-
-            if (i == 0) {
-                int256 _p = priceFeed.latestAnswer();
-                require(_p > 0, "VaultPriceFeed: invalid price");
-                p = uint256(_p);
-            } else {
-                (, int256 _p, , ,) = priceFeed.getRoundData(roundId - i);
-                require(_p > 0, "VaultPriceFeed: invalid price");
-                p = uint256(_p);
-            }
-
-            if (price == 0) {
-                price = p;
-                continue;
-            }
-
-            if (_maximise && p > price) {
-                price = p;
-                continue;
-            }
-
-            if (!_maximise && p < price) {
-                price = p;
-            }
-        }
-
-        require(price > 0, "VaultPriceFeed: could not fetch price");
-        // normalise price precision
-        uint256 _priceDecimals = priceDecimals[_token];
-        return price.mul(PRICE_PRECISION).div(10 ** _priceDecimals);
-    }
-
-    function getSecondaryPrice(address _token, uint256 _referencePrice, bool _maximise) public view returns (uint256) {
-        if (secondaryPriceFeed == address(0)) { return _referencePrice; }
-        return ISecondaryPriceFeed(secondaryPriceFeed).getPrice(_token, _referencePrice, _maximise);
-    }
-
-    function getAmmPrice(address _token) public override view returns (uint256) {
-        if (_token == bnb) {
-            // for bnbBusd, reserve0: BNB, reserve1: BUSD
-            return getPairPrice(bnbBusd, true);
-        }
-
-        if (_token == eth) {
-            uint256 price0 = getPairPrice(bnbBusd, true);
-            // for ethBnb, reserve0: ETH, reserve1: BNB
-            uint256 price1 = getPairPrice(ethBnb, true);
-            // this calculation could overflow if (price0 / 10**30) * (price1 / 10**30) is more than 10**17
-            return price0.mul(price1).div(PRICE_PRECISION);
-        }
-
+    function getAmmPair(address _token) internal view returns (address) {
         if (_token == btc) {
-            uint256 price0 = getPairPrice(bnbBusd, true);
-            // for btcBnb, reserve0: BTC, reserve1: BNB
-            uint256 price1 = getPairPrice(btcBnb, true);
-            // this calculation could overflow if (price0 / 10**30) * (price1 / 10**30) is more than 10**17
-            return price0.mul(price1).div(PRICE_PRECISION);
+            return btcBnb;
+        } else if (_token == eth) {
+            return ethBnb;
+        } else if (_token == bnb) {
+            return bnbBusd;
+        } else {
+            revert("VaultPriceFeed: AMM pair not found for token");
         }
-
-        return 0;
     }
 
-    // if divByReserve0: calculate price as reserve1 / reserve0
-    // if !divByReserve1: calculate price as reserve0 / reserve1
-    function getPairPrice(address _pair, bool _divByReserve0) public view returns (uint256) {
-        (uint256 reserve0, uint256 reserve1, ) = IPancakePair(_pair).getReserves();
-        if (_divByReserve0) {
-            if (reserve0 == 0) { return 0; }
-            return reserve1.mul(PRICE_PRECISION).div(reserve0);
+    function adjustForDecimals(uint256 _price, uint256 _tokenDecimals) internal pure returns (uint256) {
+        return _price.mul(PRICE_PRECISION).div(10 ** _tokenDecimals);
+    }
+
+    function isPriceDeviationAllowed(uint256 _price, uint256 _tokenDecimals, bool _strictStableToken) internal view returns (bool) {
+        uint256 maxPriceDeviation = maxStrictPriceDeviation;
+        if (_strictStableToken) {
+            maxPriceDeviation = BASIS_POINTS_DIVISOR;
         }
-        if (reserve1 == 0) { return 0; }
-        return reserve0.mul(PRICE_PRECISION).div(reserve1);
+        uint256 maxPriceDeviationScaled = maxPriceDeviation.mul(PRICE_PRECISION).div(10 ** _tokenDecimals);
+        return _price <= ONE_USD.add(maxPriceDeviationScaled) && _price >= ONE_USD.sub(maxPriceDeviationScaled);
+    }
+
+    function isSequencerOffline() internal view returns (bool) {
+        if (chainlinkFlags == address(0)) {
+            return false;
+        }
+        IChainlinkFlags flags = IChainlinkFlags(chainlinkFlags);
+        return flags.getFlag(FLAG_ARBITRUM_SEQ_OFFLINE);
+    }
+
+    function getPrice(address _token) external view override returns (uint256, bool) {
+        uint256 price = getLatestPrice(_token);
+        uint256 tokenDecimals = priceDecimals[_token];
+        bool strictStableToken = strictStableTokens[_token];
+        bool deviationAllowed = isPriceDeviationAllowed(price, tokenDecimals, strictStableToken);
+        return (price, deviationAllowed);
+    }
+
+    function getAmmPriceSampleSpace() external view returns (uint256) {
+        return priceSampleSpace;
+    }
+
+    function setAmmPriceSampleSpace(uint256 _priceSampleSpace) external onlyGov {
+        priceSampleSpace = _priceSampleSpace;
+    }
+
+    function getFavorPrimaryPrice() external view returns (bool) {
+        return favorPrimaryPrice;
+    }
+
+    function setFavorPrimaryPrice(bool _favorPrimaryPrice) external onlyGov {
+        favorPrimaryPrice = _favorPrimaryPrice;
     }
 }
